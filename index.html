@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PPABS Admin - Panel Definitivo</title>
+  <title>PPABS Admin - Panel Unificado</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -50,6 +50,7 @@
     .tasa-form input { border: 1px solid #ccc; padding: 0.5rem; border-radius: 4px; width: 150px; }
     .badge-blacklist { background: #fd7e14; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: bold; }
     .qr-code img { max-width: 200px; max-height: 200px; }
+    .horario-especial-item { background: #f9fafb; border-radius: 4px; padding: 8px 12px; border-left: 4px solid var(--primary); }
   </style>
 </head>
 <body>
@@ -57,7 +58,7 @@
 
   <script type="text/babel">
     // ─── CONFIGURACIÓN ────────────────────────────────────────────
-    const API_BASE = 'https://ppabs-backend-production.up.railway.app';
+    const API_BASE = 'https://ppabs-backend-production.up.railway.app'; // Cambiar a local si se prueba en desarrollo
 
     // ─── HOOK MEJORADO (con reintentos y caché) ──────────────────
     function useFetch() {
@@ -70,20 +71,16 @@
         const url = `${API_BASE}${endpoint}`;
         const cacheKey = `cache_${endpoint}`;
 
-        // 1. Leer caché (solo para GET)
         if (method === 'GET' && cacheTTL > 0) {
           const cached = localStorage.getItem(cacheKey);
           if (cached) {
             try {
               const { data, timestamp } = JSON.parse(cached);
-              if (Date.now() - timestamp < cacheTTL * 1000) {
-                return data;
-              }
+              if (Date.now() - timestamp < cacheTTL * 1000) return data;
             } catch (e) { /* ignore */ }
           }
         }
 
-        // 2. Hacer petición con reintentos
         let lastError = null;
         for (let attempt = 0; attempt < retries; attempt++) {
           try {
@@ -98,12 +95,8 @@
 
             const res = await fetch(url, fetchOptions);
             const data = await res.json();
+            if (!res.ok) throw new Error(data.error || data.message || `Error ${res.status}`);
 
-            if (!res.ok) {
-              throw new Error(data.error || data.message || `Error ${res.status}`);
-            }
-
-            // 3. Guardar en caché si es GET y tiene TTL
             if (method === 'GET' && cacheTTL > 0) {
               localStorage.setItem(cacheKey, JSON.stringify({ data, timestamp: Date.now() }));
             }
@@ -111,14 +104,12 @@
           } catch (err) {
             lastError = err;
             if (attempt < retries - 1) {
-              // Espera exponencial: 1s, 2s, 4s...
               await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
             }
           }
         }
         throw lastError || new Error('Error al comunicarse con el servidor');
       };
-
       return { request, loading, error };
     }
 
@@ -143,7 +134,6 @@
       const [onlineUsers, setOnlineUsers] = React.useState([]);
       const [lastTxCount, setLastTxCount] = React.useState(0);
 
-      // Polling de notificaciones (cada 10 segundos)
       React.useEffect(() => {
         if (!token) return;
         const fetchNotifications = async () => {
@@ -184,9 +174,7 @@
         setShowNotifications(false);
       };
 
-      if (!token) {
-        return <Login onLogin={(t) => { localStorage.setItem('token', t); setToken(t); }} showToast={show} />;
-      }
+      if (!token) return <Login onLogin={(t) => { localStorage.setItem('token', t); setToken(t); }} showToast={show} />;
 
       const handleLogout = () => {
         localStorage.removeItem('token');
@@ -223,9 +211,7 @@
               <button onClick={() => setShowNotifications(!showNotifications)}
                 className="relative w-full bg-white/10 p-3 rounded mb-2 hover:bg-white/20 transition-colors flex items-center justify-between">
                 <span>🔔 Notificaciones</span>
-                {unreadCount > 0 && (
-                  <span className="bg-red-500 text-white text-xs rounded-full px-2 py-0.5">{unreadCount}</span>
-                )}
+                {unreadCount > 0 && <span className="bg-red-500 text-white text-xs rounded-full px-2 py-0.5">{unreadCount}</span>}
               </button>
               {showNotifications && (
                 <div className="absolute bottom-20 left-0 right-0 bg-white text-black rounded shadow-lg mx-2 p-4 z-50 notification-panel">
@@ -260,7 +246,6 @@
             <h2 className="text-2xl font-bold mb-6 text-[var(--primary)] capitalize">{view}</h2>
             <ViewRenderer view={view} showToast={show} />
           </main>
-
           {toast && <div className={`toast toast-${toast.type}`}>{toast.message}</div>}
         </div>
       );
@@ -268,7 +253,91 @@
 
     // ─── LOGIN CON 2FA ────────────────────────────────────────
     function Login({ onLogin, showToast }) {
-      // ... (el código de login se mantiene igual que antes) ...
+      const [username, setUsername] = React.useState('');
+      const [password, setPassword] = React.useState('');
+      const [code2FA, setCode2FA] = React.useState('');
+      const [step, setStep] = React.useState('login');
+      const [loading, setLoading] = React.useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (step === 'login' && (!username || !password)) {
+          showToast('Completa todos los campos', 'error');
+          return;
+        }
+        if (step === '2fa' && !code2FA) {
+          showToast('Ingresa el código de 6 dígitos', 'error');
+          return;
+        }
+
+        setLoading(true);
+        try {
+          const body = { username, password, ...(step === '2fa' && { code: code2FA }) };
+          const res = await fetch(`${API_BASE}/api/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Error en login');
+
+          if (data.requires_2fa) {
+            setStep('2fa');
+            showToast('Código de 2FA requerido', 'info');
+            setLoading(false);
+            return;
+          }
+          onLogin(data.token);
+          showToast('Login exitoso', 'success');
+        } catch (err) {
+          showToast(err.message, 'error');
+          setLoading(false);
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-[var(--bg)]">
+          <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+            <h1 className="text-3xl font-bold text-[var(--primary)] mb-6 text-center">PPABS Admin</h1>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              {step === 'login' ? (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">Usuario</label>
+                    <input type="text" value={username} onChange={(e) => setUsername(e.target.value)}
+                      className="mt-1 w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
+                      placeholder="erisanchez" disabled={loading} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">Contraseña</label>
+                    <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+                      className="mt-1 w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
+                      placeholder="••••••••" disabled={loading} />
+                  </div>
+                  <button type="submit" className="btn-primary w-full py-3 rounded font-bold text-lg disabled:opacity-50" disabled={loading}>
+                    {loading ? 'Verificando...' : '🔑 Ingresar'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">Código de 6 dígitos</label>
+                    <input type="text" maxLength={6} value={code2FA} onChange={(e) => setCode2FA(e.target.value.replace(/\D/g, ''))}
+                      className="mt-1 w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
+                      placeholder="123456" disabled={loading} autoFocus />
+                  </div>
+                  <button type="submit" className="btn-primary w-full py-3 rounded font-bold text-lg disabled:opacity-50" disabled={loading}>
+                    {loading ? 'Verificando...' : '✅ Verificar código'}
+                  </button>
+                  <button type="button" onClick={() => { setStep('login'); setCode2FA(''); }} className="w-full text-sm text-gray-500 hover:underline">
+                    ← Volver
+                  </button>
+                </>
+              )}
+            </form>
+          </div>
+        </div>
+      );
     }
 
     // ─── RENDER DE VISTAS ──────────────────────────────────────
@@ -287,27 +356,314 @@
 
     // ─── DASHBOARD ──────────────────────────────────────────────
     function Dashboard({ request, loading, showToast }) {
-      // ... (igual que antes, con fetchTasa en useEffect) ...
+      const [stats, setStats] = React.useState({ usuarios: 0, verificados: 0, txPendientes: 0, totalTransacciones: 0 });
+      const [tasa, setTasa] = React.useState('42.00');
+      const [nuevaTasa, setNuevaTasa] = React.useState('');
+
+      const fetchStats = async () => {
+        try {
+          const data = await request('/api/admin/estadisticas');
+          if (data.success) setStats(data.data);
+        } catch (e) {}
+      };
+
+      const fetchTasa = async () => {
+        try {
+          const data = await request('/api/admin/tasa/ultima');
+          if (data.success) setTasa(data.tasa);
+        } catch (e) {}
+      };
+
+      React.useEffect(() => {
+        fetchStats();
+        fetchTasa();
+      }, []);
+
+      const handleUpdateTasa = async () => {
+        if (!nuevaTasa || isNaN(nuevaTasa)) {
+          showToast('Ingresa un número válido', 'error');
+          return;
+        }
+        try {
+          await request('/api/admin/tasa', 'POST', { nuevaTasa: parseFloat(nuevaTasa) });
+          showToast(`Tasa actualizada a ${nuevaTasa}`, 'success');
+          setTasa(nuevaTasa);
+          setNuevaTasa('');
+          fetchTasa();
+        } catch (e) {
+          showToast(e.message, 'error');
+        }
+      };
+
+      return (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div className="card border-l-4 border-[var(--primary)]">
+              <h3 className="text-sm opacity-60">Total Usuarios</h3>
+              <p className="text-3xl font-bold text-[var(--primary)]">{stats.usuarios}</p>
+            </div>
+            <div className="card border-l-4 border-[var(--success)]">
+              <h3 className="text-sm opacity-60">Verificados</h3>
+              <p className="text-3xl font-bold text-[var(--success)]">{stats.verificados}</p>
+            </div>
+            <div className="card border-l-4 border-[var(--warning)]">
+              <h3 className="text-sm opacity-60">Tx Pendientes</h3>
+              <p className="text-3xl font-bold text-[var(--warning)]">{stats.txPendientes}</p>
+            </div>
+            <div className="card border-l-4 border-[var(--danger)]">
+              <h3 className="text-sm opacity-60">Total Tx</h3>
+              <p className="text-3xl font-bold text-[var(--danger)]">{stats.totalTransacciones}</p>
+            </div>
+          </div>
+          <div className="card">
+            <h3 className="text-lg font-semibold mb-2">Tasa de Cambio</h3>
+            <div className="flex items-center gap-4 flex-wrap">
+              <span className="text-2xl font-bold text-[var(--primary)]">1 USD = {tasa} VES</span>
+              <div className="tasa-form ml-auto">
+                <input type="number" step="0.01" value={nuevaTasa} onChange={(e) => setNuevaTasa(e.target.value)}
+                  placeholder="Nueva tasa" className="border border-gray-300 rounded px-3 py-2 w-32" />
+                <button onClick={handleUpdateTasa} className="btn-primary px-4 py-2 rounded" disabled={loading}>
+                  {loading ? 'Actualizando...' : 'Actualizar Tasa'}
+                </button>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 mt-2">Última actualización: {new Date().toLocaleString()}</p>
+          </div>
+        </div>
+      );
     }
 
     // ─── KYC ──────────────────────────────────────────────────
     function KycManagement({ request, loading, showToast }) {
-      // ... (igual que antes) ...
+      const [kycList, setKycList] = React.useState([]);
+      const [filter, setFilter] = React.useState('');
+      const [statusFilter, setStatusFilter] = React.useState('');
+
+      const fetchKyc = async () => {
+        try {
+          const data = await request('/api/admin/kyc');
+          if (data.success) setKycList(data.data);
+        } catch (e) {
+          showToast('Error al cargar KYC', 'error');
+        }
+      };
+      React.useEffect(() => { fetchKyc(); }, []);
+
+      const handleAction = async (kyc_id, action, telegram_id) => {
+        if (action === 'validar') {
+          const motivo = prompt('Motivo de validación:', 'Documentos verificados');
+          if (!motivo) return;
+          try {
+            await request(`/api/admin/kyc/${kyc_id}/status`, 'PUT', { status: 'VALIDADO', motivo });
+            showToast('Usuario validado', 'success');
+            fetchKyc();
+          } catch (e) { showToast(e.message, 'error'); }
+        } else if (action === 'bloquear') {
+          const motivo = prompt('Motivo del bloqueo:', '');
+          if (!motivo) return;
+          try {
+            await request(`/api/admin/usuarios/${telegram_id}/bloquear`, 'PUT', { motivo });
+            showToast('Usuario bloqueado', 'success');
+            fetchKyc();
+          } catch (e) { showToast(e.message, 'error'); }
+        } else if (action === 'suspender') {
+          const motivo = prompt('Motivo de suspensión:', '');
+          if (!motivo) return;
+          try {
+            await request(`/api/admin/kyc/${kyc_id}/status`, 'PUT', { status: 'SUSPENDIDO', motivo });
+            showToast('Usuario suspendido', 'success');
+            fetchKyc();
+          } catch (e) { showToast(e.message, 'error'); }
+        } else if (action === 'eliminar_duplicado') {
+          if (!confirm(`¿Eliminar físicamente el registro duplicado ${kyc_id}?`)) return;
+          try {
+            await request(`/api/admin/kyc/${kyc_id}`, 'DELETE');
+            showToast('Registro eliminado', 'success');
+            fetchKyc();
+          } catch (deleteError) {
+            await request(`/api/admin/kyc/${kyc_id}/status`, 'PUT', { status: 'RECHAZADO', motivo: 'Duplicado eliminado' });
+            showToast('Marcado como rechazado', 'success');
+            fetchKyc();
+          }
+        }
+      };
+
+      const filteredList = kycList.filter(item => {
+        if (!item.kyc_id) return false;
+        const match = item.nombre?.toLowerCase().includes(filter.toLowerCase()) || String(item.telegram_id || '').includes(filter);
+        const matchStatus = statusFilter ? item.status === statusFilter : true;
+        return match && matchStatus;
+      });
+      const statusOptions = ['EN_REVISIÓN', 'VALIDADO', 'SUSPENDIDO', 'BLOQUEADO', 'RECHAZADO', 'BAJA'];
+
+      return (
+        <div className="card space-y-4">
+          <div className="flex flex-wrap gap-4 items-center">
+            <input type="text" placeholder="Buscar por nombre o ID" value={filter} onChange={(e) => setFilter(e.target.value)}
+              className="border border-gray-300 rounded px-3 py-2 flex-1 min-w-[200px]" />
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="border border-gray-300 rounded px-3 py-2">
+              <option value="">Todos</option>
+              {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <button onClick={fetchKyc} className="btn-primary px-4 py-2 rounded">🔄 Refrescar</button>
+          </div>
+
+          {loading ? <div className="loading">Cargando...</div> : (
+            <div className="table-container">
+              <table>
+                <thead><tr><th>KYC ID</th><th>Telegram</th><th>Nombre</th><th>Cédula</th><th>Estado</th><th>Duplicado</th><th>Acciones</th></tr></thead>
+                <tbody>
+                  {filteredList.map(item => {
+                    const isDuplicate = item.is_duplicate || false;
+                    return (
+                      <tr key={item.kyc_id} className={isDuplicate ? 'duplicate-row' : ''}>
+                        <td className="font-mono text-xs">{item.kyc_id}</td>
+                        <td>{item.telegram_id}</td>
+                        <td>{item.nombre}</td>
+                        <td>{item.cedula}</td>
+                        <td><span className={`status-badge status-${item.status?.toLowerCase() || 'en_revision'}`}>{item.status || 'EN_REVISIÓN'}</span></td>
+                        <td>{isDuplicate ? `⚠️ ${item.duplicate_reason}` : '✅'}</td>
+                        <td>
+                          <select className="action-select" defaultValue="" onChange={(e) => {
+                            const val = e.target.value;
+                            if (val) { const [action] = val.split('|'); handleAction(item.kyc_id, action, item.telegram_id); e.target.value = ''; }
+                          }}>
+                            <option value="">Seleccionar...</option>
+                            {item.status !== 'VALIDADO' && <option value="validar">✅ Validar</option>}
+                            {item.status !== 'BLOQUEADO' && <option value="bloquear">🚫 Bloquear</option>}
+                            {item.status !== 'SUSPENDIDO' && <option value="suspender">⏸️ Suspender</option>}
+                            {isDuplicate && <option value="eliminar_duplicado">🗑️ Eliminar duplicado</option>}
+                          </select>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filteredList.length === 0 && <tr><td colSpan="7" className="text-center py-4 text-gray-500">No hay registros</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      );
     }
 
     // ─── LISTA NEGRA ──────────────────────────────────────────
     function BlacklistView({ request, loading, showToast }) {
-      // ... (igual que antes) ...
+      const [kycList, setKycList] = React.useState([]);
+      const [filter, setFilter] = React.useState('');
+
+      const fetchBlacklist = async () => {
+        try {
+          const data = await request('/api/admin/kyc');
+          if (data.success) {
+            const blacklistItems = data.data.filter(item => {
+              const blacklistedStatus = ['BLOQUEADO', 'SUSPENDIDO', 'RECHAZADO'].includes(item.status);
+              const isDuplicate = item.is_duplicate === true;
+              return blacklistedStatus || isDuplicate;
+            });
+            setKycList(blacklistItems);
+          }
+        } catch (e) {
+          showToast('Error al cargar lista negra', 'error');
+        }
+      };
+
+      React.useEffect(() => { fetchBlacklist(); }, []);
+
+      const handleAction = async (kyc_id, action, telegram_id) => {
+        if (action === 'validar') {
+          const motivo = prompt('Motivo de validación:', '');
+          if (!motivo) return;
+          try {
+            await request(`/api/admin/kyc/${kyc_id}/status`, 'PUT', { status: 'VALIDADO', motivo });
+            showToast('Usuario movido a validado', 'success');
+            fetchBlacklist();
+          } catch (e) { showToast(e.message, 'error'); }
+        } else if (action === 'desbloquear') {
+          const motivo = prompt('Motivo de desbloqueo:', '');
+          if (!motivo) return;
+          try {
+            await request(`/api/admin/kyc/${kyc_id}/status`, 'PUT', { status: 'VALIDADO', motivo });
+            showToast('Usuario desbloqueado', 'success');
+            fetchBlacklist();
+          } catch (e) { showToast(e.message, 'error'); }
+        } else if (action === 'eliminar_duplicado') {
+          if (!confirm(`¿Eliminar físicamente el registro duplicado ${kyc_id}?`)) return;
+          try {
+            await request(`/api/admin/kyc/${kyc_id}`, 'DELETE');
+            showToast('Registro eliminado', 'success');
+            fetchBlacklist();
+          } catch (deleteError) {
+            await request(`/api/admin/kyc/${kyc_id}/status`, 'PUT', { status: 'RECHAZADO', motivo: 'Duplicado eliminado' });
+            showToast('Marcado como rechazado', 'success');
+            fetchBlacklist();
+          }
+        }
+      };
+
+      const filteredList = kycList.filter(item => {
+        if (!item.kyc_id) return false;
+        return item.nombre?.toLowerCase().includes(filter.toLowerCase()) || String(item.telegram_id || '').includes(filter);
+      });
+
+      return (
+        <div className="card space-y-4">
+          <div className="flex flex-wrap gap-4 items-center">
+            <input type="text" placeholder="Buscar en lista negra..." value={filter} onChange={(e) => setFilter(e.target.value)}
+              className="border border-gray-300 rounded px-3 py-2 flex-1 min-w-[200px]" />
+            <button onClick={fetchBlacklist} className="btn-primary px-4 py-2 rounded">🔄 Refrescar</button>
+            <span className="text-sm text-gray-500">Total: {filteredList.length} en lista negra</span>
+          </div>
+
+          {loading ? <div className="loading">Cargando...</div> : (
+            <div className="table-container">
+              <table>
+                <thead><tr><th>KYC ID</th><th>Telegram</th><th>Nombre</th><th>Cédula</th><th>Estado</th><th>Motivo</th><th>Acciones</th></tr></thead>
+                <tbody>
+                  {filteredList.map(item => {
+                    const isDuplicate = item.is_duplicate || false;
+                    const reason = isDuplicate ? `Duplicado (${item.duplicate_reason})` : item.motivo_estado || 'N/A';
+                    return (
+                      <tr key={item.kyc_id} className={isDuplicate ? 'duplicate-row' : 'blacklist-row'}>
+                        <td className="font-mono text-xs">{item.kyc_id}</td>
+                        <td>{item.telegram_id}</td>
+                        <td>{item.nombre}</td>
+                        <td>{item.cedula}</td>
+                        <td>
+                          <span className={`status-badge status-${item.status?.toLowerCase() || 'en_revision'}`}>{item.status || 'EN_REVISIÓN'}</span>
+                          {isDuplicate && <span className="badge-blacklist ml-2">Duplicado</span>}
+                        </td>
+                        <td className="text-sm text-gray-600">{reason}</td>
+                        <td>
+                          <select className="action-select" defaultValue="" onChange={(e) => {
+                            const val = e.target.value;
+                            if (val) { const [action] = val.split('|'); handleAction(item.kyc_id, action, item.telegram_id); e.target.value = ''; }
+                          }}>
+                            <option value="">Acciones...</option>
+                            <option value="validar">✅ Mover a validado</option>
+                            {item.status === 'BLOQUEADO' && <option value="desbloquear">🔓 Desbloquear</option>}
+                            {isDuplicate && <option value="eliminar_duplicado">🗑️ Eliminar duplicado</option>}
+                          </select>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filteredList.length === 0 && <tr><td colSpan="7" className="text-center py-4 text-gray-500">🎉 No hay usuarios en lista negra</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      );
     }
 
-    // ─── TRANSACCIONES (con filtros, edición y disputas) ──
+    // ─── TRANSACCIONES ──────────────────────────────────────────
     function TransactionManagement({ request, loading, showToast }) {
       const [txList, setTxList] = React.useState([]);
       const [filter, setFilter] = React.useState('');
       const [periodo, setPeriodo] = React.useState('');
       const [showModal, setShowModal] = React.useState(false);
       const [newTx, setNewTx] = React.useState({ user_id: '', amount_usd: '', paypal_tx_id: '', payment_method_id: '' });
-      // Estado para el modal de edición
       const [editTx, setEditTx] = React.useState(null);
       const [editData, setEditData] = React.useState({ status: '', tasa_aplicada: '', amount_usd: '' });
 
@@ -316,11 +672,8 @@
           let url = '/api/transactions';
           const params = new URLSearchParams();
           if (periodo) params.append('periodo', periodo);
-          if (filter) params.append('estado', filter); // Asumo que filter es para estado
-          // Corregir: filter se usará para búsqueda y estado en el select
-          if (url.includes('?')) url += `&${params.toString()}`;
-          else if (params.toString()) url += `?${params.toString()}`;
-          
+          if (filter) params.append('estado', filter);
+          if (params.toString()) url += `?${params.toString()}`;
           const data = await request(url);
           if (data.transactions) setTxList(data.transactions);
         } catch (e) {
@@ -388,8 +741,7 @@
         }
       };
 
-      const filtered = txList; // Ya filtrado por período y estado en el backend
-
+      const filtered = txList;
       const statusOptions = ['PAGADO', 'PROCESANDO', 'COMPLETADO', 'RECHAZADO', 'DISPUTA'];
 
       return (
@@ -422,11 +774,7 @@
                       <td>Bs. {tx.amount_local}</td>
                       <td>{tx.rate_applied || 'N/A'}</td>
                       <td>{tx.method}</td>
-                      <td>
-                        <span className={`status-badge status-${tx.status?.toLowerCase() || 'pagado'}`}>
-                          {tx.status || 'PAGADO'}
-                        </span>
-                      </td>
+                      <td><span className={`status-badge status-${tx.status?.toLowerCase() || 'pagado'}`}>{tx.status || 'PAGADO'}</span></td>
                       <td>
                         <select className="action-select" value={tx.status || 'PAGADO'} onChange={(e) => handleStatusUpdate(tx.transaction_id, e.target.value)}>
                           {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
@@ -464,24 +812,10 @@
                 <h2 className="text-xl font-bold mb-4">Editar Transacción</h2>
                 <p className="text-sm text-gray-500 mb-2">ID: {editTx.transaction_id}</p>
                 <div className="space-y-3">
-                  <div>
-                    <label className="block text-sm font-medium">Estado</label>
-                    <select value={editData.status} onChange={(e) => setEditData({...editData, status: e.target.value})} className="w-full border border-gray-300 rounded px-3 py-2">
-                      {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium">Tasa Aplicada</label>
-                    <input type="number" step="0.01" value={editData.tasa_aplicada} onChange={(e) => setEditData({...editData, tasa_aplicada: e.target.value})} className="w-full border border-gray-300 rounded px-3 py-2" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium">Monto USD</label>
-                    <input type="number" step="0.01" value={editData.amount_usd} onChange={(e) => setEditData({...editData, amount_usd: e.target.value})} className="w-full border border-gray-300 rounded px-3 py-2" />
-                  </div>
-                  <div className="flex gap-4 mt-4">
-                    <button onClick={handleSaveEdit} className="btn-primary px-4 py-2 rounded" disabled={loading}>Guardar Cambios</button>
-                    <button onClick={() => setShowModal(false)} className="bg-gray-300 px-4 py-2 rounded hover:bg-gray-400">Cancelar</button>
-                  </div>
+                  <div><label className="block text-sm font-medium">Estado</label><select value={editData.status} onChange={(e) => setEditData({...editData, status: e.target.value})} className="w-full border border-gray-300 rounded px-3 py-2">{statusOptions.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+                  <div><label className="block text-sm font-medium">Tasa Aplicada</label><input type="number" step="0.01" value={editData.tasa_aplicada} onChange={(e) => setEditData({...editData, tasa_aplicada: e.target.value})} className="w-full border border-gray-300 rounded px-3 py-2" /></div>
+                  <div><label className="block text-sm font-medium">Monto USD</label><input type="number" step="0.01" value={editData.amount_usd} onChange={(e) => setEditData({...editData, amount_usd: e.target.value})} className="w-full border border-gray-300 rounded px-3 py-2" /></div>
+                  <div className="flex gap-4 mt-4"><button onClick={handleSaveEdit} className="btn-primary px-4 py-2 rounded" disabled={loading}>Guardar Cambios</button><button onClick={() => setShowModal(false)} className="bg-gray-300 px-4 py-2 rounded hover:bg-gray-400">Cancelar</button></div>
                 </div>
               </div>
             </div>
@@ -499,15 +833,12 @@
 
       const fetch2FAStatus = async () => {
         try {
-          // Intentar obtener el QR (genera secreto si no existe)
           const data = await request('/api/admin/2fa/qr', 'GET', null, { cacheTTL: 0 });
           if (data.success) {
             setQrCode(data.qr);
             setSecret(data.secret);
           }
-        } catch (e) {
-          // Si falla, probablemente no tiene 2FA configurado, pero el QR se generará.
-        }
+        } catch (e) { /* ignore */ }
       };
 
       const check2FA = async () => {
@@ -538,16 +869,11 @@
         }
       };
 
-      React.useEffect(() => {
-        fetch2FAStatus();
-        // Verificar estado actual (podríamos llamar a un endpoint de estado)
-        // Por simplicidad, asumimos que si hay QR, está disponible.
-      }, []);
+      React.useEffect(() => { fetch2FAStatus(); }, []);
 
       return (
         <div className="card max-w-2xl mx-auto">
           <h3 className="text-xl font-bold mb-4">🔐 Seguridad</h3>
-          
           <div className="space-y-6">
             <div>
               <h4 className="font-semibold">Autenticación de Dos Factores (2FA)</h4>
@@ -568,12 +894,8 @@
                   {secret && <p className="text-xs text-gray-500">Secret: {secret}</p>}
                 </div>
               )}
-              {!qrCode && (
-                <button onClick={fetch2FAStatus} className="btn-primary px-4 py-2 rounded mt-2">Generar Código QR</button>
-              )}
-              {qrCode && (
-                <button onClick={disable2FA} className="btn-danger px-4 py-2 rounded mt-2 ml-2">Desactivar 2FA</button>
-              )}
+              {!qrCode && <button onClick={fetch2FAStatus} className="btn-primary px-4 py-2 rounded mt-2">Generar Código QR</button>}
+              {qrCode && <button onClick={disable2FA} className="btn-danger px-4 py-2 rounded mt-2 ml-2">Desactivar 2FA</button>}
             </div>
           </div>
         </div>
@@ -636,74 +958,180 @@
       );
     }
 
-    // ─── HORARIOS (con calendario y festivos) ──────────────
+    // ─── HORARIOS (NUEVA VERSIÓN CON CALENDARIO Y MOTIVO) ──
     function HorariosView({ request, loading, showToast }) {
-      const [festivos, setFestivos] = React.useState([]);
-      const [nuevaFecha, setNuevaFecha] = React.useState('');
-      const [nuevoMotivo, setNuevoMotivo] = React.useState('');
+      // Estado para horarios especiales
+      const [especiales, setEspeciales] = React.useState([]);
+      const [nuevoEspecial, setNuevoEspecial] = React.useState({
+        day: '',
+        open_time: '',
+        close_time: '',
+        is_closed: false,
+        motivo: ''
+      });
 
-      const fetchFestivos = async () => {
+      // Estado para horarios regulares (días de la semana)
+      const [horariosRegulares, setHorariosRegulares] = React.useState({
+        lunes: { open: '08:00', close: '17:00', closed: false },
+        martes: { open: '08:00', close: '17:00', closed: false },
+        miércoles: { open: '08:00', close: '17:00', closed: false },
+        jueves: { open: '08:00', close: '17:00', closed: false },
+        viernes: { open: '08:00', close: '17:00', closed: false },
+        sábado: { open: '08:00', close: '17:00', closed: false },
+        domingo: { open: '08:00', close: '17:00', closed: false }
+      });
+
+      const fetchEspeciales = async () => {
         try {
-          const data = await request('/api/admin/festivos');
-          if (data.success) setFestivos(data.data || []);
+          const data = await request('/api/admin/horarios-especiales');
+          if (data.success) setEspeciales(data.data || []);
         } catch (e) {
-          showToast('Error al cargar días festivos', 'error');
+          showToast('Error al cargar horarios especiales', 'error');
         }
       };
 
-      React.useEffect(() => { fetchFestivos(); }, []);
+      React.useEffect(() => { fetchEspeciales(); }, []);
 
-      const handleAddFestivo = async () => {
-        if (!nuevaFecha || !nuevoMotivo) {
-          showToast('Selecciona una fecha y escribe un motivo', 'error');
+      // Manejar cambios en el formulario de horario especial
+      const handleEspecialChange = (e) => {
+        const { name, value, type, checked } = e.target;
+        setNuevoEspecial(prev => ({
+          ...prev,
+          [name]: type === 'checkbox' ? checked : value
+        }));
+      };
+
+      // Guardar horario especial
+      const handleGuardarEspecial = async () => {
+        const { day, open_time, close_time, is_closed, motivo } = nuevoEspecial;
+        if (!day) {
+          showToast('Selecciona una fecha', 'error');
+          return;
+        }
+        if (!is_closed && (!open_time || !close_time)) {
+          showToast('Si no está cerrado, ingresa hora de apertura y cierre', 'error');
           return;
         }
         try {
-          await request('/api/admin/festivos', 'POST', { fecha: nuevaFecha, motivo: nuevoMotivo });
-          showToast('Día festivo agregado', 'success');
-          setNuevaFecha('');
-          setNuevoMotivo('');
-          fetchFestivos();
+          await request('/api/admin/horarios-especiales', 'POST', { day, open_time, close_time, is_closed, motivo });
+          showToast('Horario especial guardado', 'success');
+          setNuevoEspecial({ day: '', open_time: '', close_time: '', is_closed: false, motivo: '' });
+          fetchEspeciales();
         } catch (e) {
           showToast(e.message, 'error');
         }
       };
 
-      const handleToggleFestivo = async (id, activo) => {
+      // Eliminar horario especial
+      const handleEliminarEspecial = async (day) => {
+        if (!confirm(`¿Eliminar el horario especial del día ${day}?`)) return;
         try {
-          await request(`/api/admin/festivos/${id}`, 'PUT', { activo: !activo });
-          showToast('Estado actualizado', 'success');
-          fetchFestivos();
+          await request(`/api/admin/horarios-especiales/${day}`, 'DELETE');
+          showToast('Horario eliminado', 'success');
+          fetchEspeciales();
         } catch (e) {
           showToast(e.message, 'error');
         }
       };
+
+      // Manejar cambios en horarios regulares
+      const handleRegularChange = (day, field, value) => {
+        setHorariosRegulares(prev => ({
+          ...prev,
+          [day]: { ...prev[day], [field]: value }
+        }));
+      };
+
+      // Guardar horarios regulares (placeholder)
+      const handleGuardarRegulares = async () => {
+        showToast('Funcionalidad de guardado de horarios regulares en desarrollo', 'info');
+        // Aquí se podría llamar a PUT /api/admin/horarios si se implementa
+      };
+
+      const diasSemana = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];
 
       return (
-        <div className="card max-w-2xl">
-          <h3 className="text-lg font-semibold mb-4">⏰ Gestión de Horarios y Días Festivos</h3>
-          
-          <div className="mb-6 p-4 border rounded bg-gray-50">
-            <h4 className="font-medium mb-2">Agregar Día Festivo</h4>
-            <div className="flex flex-wrap gap-4 items-center">
-              <input type="date" value={nuevaFecha} onChange={(e) => setNuevaFecha(e.target.value)} className="border border-gray-300 rounded px-3 py-2" />
-              <input type="text" placeholder="Motivo" value={nuevoMotivo} onChange={(e) => setNuevoMotivo(e.target.value)} className="border border-gray-300 rounded px-3 py-2 flex-1" />
-              <button onClick={handleAddFestivo} className="btn-primary px-4 py-2 rounded" disabled={loading}>Agregar</button>
+        <div className="card max-w-4xl mx-auto">
+          <h3 className="text-xl font-bold mb-4">⏰ Gestión de Horarios</h3>
+
+          {/* Horarios regulares */}
+          <div className="mb-8 border rounded p-4 bg-gray-50">
+            <h4 className="font-medium mb-3">Horarios Regulares (UTC-4)</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {diasSemana.map(day => (
+                <div key={day} className="flex items-center gap-2 flex-wrap">
+                  <span className="w-20 font-medium capitalize">{day}</span>
+                  <input type="time" value={horariosRegulares[day].open} onChange={(e) => handleRegularChange(day, 'open', e.target.value)}
+                    className="border rounded px-2 py-1 w-24" />
+                  <span>—</span>
+                  <input type="time" value={horariosRegulares[day].close} onChange={(e) => handleRegularChange(day, 'close', e.target.value)}
+                    className="border rounded px-2 py-1 w-24" />
+                  <label className="flex items-center gap-1 text-sm">
+                    <input type="checkbox" checked={horariosRegulares[day].closed} onChange={(e) => handleRegularChange(day, 'closed', e.target.checked)} />
+                    Cerrado
+                  </label>
+                </div>
+              ))}
             </div>
+            <button onClick={handleGuardarRegulares} className="btn-primary px-4 py-2 rounded mt-3" disabled={loading}>
+              💾 Guardar Horarios Regulares
+            </button>
+            <p className="text-xs text-gray-400 mt-1">* Esta funcionalidad está en desarrollo. Los cambios no se guardarán.</p>
           </div>
 
+          {/* Horarios especiales */}
+          <div className="border rounded p-4 bg-gray-50 mb-6">
+            <h4 className="font-medium mb-3">📅 Programar Horario Especial</h4>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium">Fecha *</label>
+                <input type="date" name="day" value={nuevoEspecial.day} onChange={handleEspecialChange}
+                  className="w-full border rounded px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium">Apertura</label>
+                <input type="time" name="open_time" value={nuevoEspecial.open_time} onChange={handleEspecialChange}
+                  className="w-full border rounded px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium">Cierre</label>
+                <input type="time" name="close_time" value={nuevoEspecial.close_time} onChange={handleEspecialChange}
+                  className="w-full border rounded px-3 py-2" />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium">Motivo</label>
+                <input type="text" name="motivo" value={nuevoEspecial.motivo} onChange={handleEspecialChange}
+                  className="w-full border rounded px-3 py-2" placeholder="Ej. Feriado nacional" />
+              </div>
+              <div className="flex items-center gap-2">
+                <input type="checkbox" name="is_closed" checked={nuevoEspecial.is_closed} onChange={handleEspecialChange} />
+                <label className="text-sm">Cerrado todo el día</label>
+              </div>
+            </div>
+            <button onClick={handleGuardarEspecial} className="btn-primary px-4 py-2 rounded mt-3" disabled={loading}>
+              {loading ? 'Guardando...' : 'Guardar Horario Especial'}
+            </button>
+          </div>
+
+          {/* Lista de horarios especiales */}
           <div>
-            <h4 className="font-medium mb-2">Días Festivos Programados</h4>
-            {festivos.length === 0 ? (
-              <p className="text-gray-500">No hay días festivos programados.</p>
+            <h4 className="font-medium mb-2">Horarios Especiales Programados</h4>
+            {especiales.length === 0 ? (
+              <p className="text-gray-500">No hay horarios especiales programados.</p>
             ) : (
               <ul className="space-y-2">
-                {festivos.map(f => (
-                  <li key={f.id} className="flex justify-between items-center border-b pb-2">
-                    <span>{f.fecha} - {f.motivo} <span className={`text-xs ${f.activo ? 'text-green-600' : 'text-red-600'}`}>({f.activo ? 'Activo' : 'Inactivo'})</span></span>
-                    <button onClick={() => handleToggleFestivo(f.id, f.activo)} className={`text-xs px-2 py-1 rounded ${f.activo ? 'bg-red-500 text-white' : 'bg-green-500 text-white'}`}>
-                      {f.activo ? 'Desactivar' : 'Activar'}
-                    </button>
+                {especiales.map(item => (
+                  <li key={item.day} className="horario-especial-item flex justify-between items-center">
+                    <div>
+                      <span className="font-mono font-medium">{item.day}</span>
+                      {item.is_closed ? (
+                        <span className="ml-2 text-red-600 font-semibold">Cerrado</span>
+                      ) : (
+                        <span className="ml-2">{item.open_time} - {item.close_time}</span>
+                      )}
+                      {item.motivo && <span className="ml-2 text-sm text-gray-500">({item.motivo})</span>}
+                    </div>
+                    <button onClick={() => handleEliminarEspecial(item.day)} className="text-red-600 hover:text-red-800 text-sm font-medium">Eliminar</button>
                   </li>
                 ))}
               </ul>
@@ -715,7 +1143,36 @@
 
     // ─── USUARIOS ──────────────────────────────────────────────
     function Usuarios({ request, loading, showToast }) {
-      // ... (igual que antes) ...
+      const [users, setUsers] = React.useState([]);
+      React.useEffect(() => {
+        const fetchUsers = async () => {
+          try {
+            const data = await request('/api/admin/kyc');
+            if (data.success) setUsers(data.data);
+          } catch (e) {}
+        };
+        fetchUsers();
+      }, []);
+      return (
+        <div className="card">
+          <h3 className="text-lg font-semibold mb-4">Lista de Usuarios</h3>
+          <div className="table-container">
+            <table>
+              <thead><tr><th>ID</th><th>Nombre</th><th>Telegram</th><th>Estado</th></tr></thead>
+              <tbody>
+                {users.filter(u => u.kyc_id).map(u => (
+                  <tr key={u.kyc_id}>
+                    <td>{u.kyc_id}</td>
+                    <td>{u.nombre}</td>
+                    <td>{u.telegram_id}</td>
+                    <td><span className={`status-badge status-${u.status?.toLowerCase() || 'en_revision'}`}>{u.status || 'EN_REVISIÓN'}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
     }
 
     // ─── RENDER ──────────────────────────────────────────────────
